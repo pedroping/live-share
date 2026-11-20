@@ -11,7 +11,9 @@
     "prestart": "npm run sync && npm run build:native",
     "start": "electron .",
     "predist": "npm run sync && npm run build:native",
-    "dist": "electron-builder --win portable nsis"
+    "dist": "electron-builder --win portable nsis",
+    "test:e2e": "npm run sync && npm run build:native && electron test/e2e.js",
+    "test": "npm run build:native && node --test test/appaudio.test.js"
   },
   "build": {
     "appId": "com.pedroping.liveshare",
