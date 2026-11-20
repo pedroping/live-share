@@ -6,8 +6,8 @@ const path = require('node:path');
 const { freePort } = require('./helpers');
 
 const PUBLIC = path.join(__dirname, '..', 'public');
-const { selectClipSegments } = require(path.join(PUBLIC, 'clip-buffer.js'));
-const ServerWake = require(path.join(PUBLIC, 'server-wake.js'));
+const { selectClipSegments } = require(path.join(PUBLIC, 'js', 'clip-buffer.js'));
+const ServerWake = require(path.join(PUBLIC, 'js', 'server-wake.js'));
 
 test('selectClipSegments picks the newest segments covering the wanted length', () => {
   const segments = [1, 2, 3, 4].map((n) => ({ n, durationMs: 5000 }));

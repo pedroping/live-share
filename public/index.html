@@ -4,24 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Transmissão de tela</title>
-<style>
-  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 60px auto; padding: 0 16px; text-align: center; }
-  a.btn {
-    display: inline-block; padding: 16px 28px; margin: 6px; border-radius: 8px;
-    background: #2563eb; color: white; text-decoration: none; font-size: 18px;
-  }
-  a.btn.secondary { background: #16a34a; }
-  .clips-section { margin-top: 56px; text-align: left; }
-  .clips-section h2 { text-align: center; font-size: 20px; color: #334155; }
-  #clipsStatus { text-align: center; color: #64748b; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 18px; margin-top: 16px; }
-  .card { background: #f8fafc; border-radius: 10px; padding: 10px; }
-  .card video { width: 100%; border-radius: 8px; background: #000; }
-  .card .meta { font-size: 13px; color: #64748b; margin-top: 6px; display: flex; justify-content: space-between; }
-  .see-all { display: block; text-align: center; margin-top: 18px; color: #7c3aed; text-decoration: none; font-weight: 600; }
-</style>
+<link rel="stylesheet" href="/css/site.css">
 </head>
-<body>
+<body class="page-home">
   <h1>Transmissão de tela</h1>
   <p>Escolha uma opção:</p>
   <a class="btn" href="/broadcast.html">Iniciar transmissão</a>
@@ -34,15 +19,15 @@
     <a class="see-all" href="/clips.html">Ver todos os clipes →</a>
   </div>
 
-<script src="/server-wake.js"></script>
-<script src="/clips.js"></script>
+<script src="/js/server-wake.js"></script>
+<script src="/js/clip-gallery.js"></script>
 <script>
-renderClips({
-  statusEl: document.getElementById('clipsStatus'),
-  grid: document.getElementById('clipsGrid'),
-  limit: 6,
-  emptyText: 'Nenhum clipe salvo ainda. Assista uma transmissão e clipe um momento!',
-});
+  renderClips({
+    statusEl: document.getElementById('clipsStatus'),
+    grid: document.getElementById('clipsGrid'),
+    limit: 6,
+    emptyText: 'Nenhum clipe salvo ainda. Assista uma transmissão e clipe um momento!',
+  });
 </script>
 </body>
 </html>
