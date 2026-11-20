@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transmitir</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; text-align: center; }
+  button {
+    padding: 14px 24px; font-size: 18px; border: none; border-radius: 8px;
+    background: #2563eb; color: white; cursor: pointer;
+  }
+  button:disabled { background: #93c5fd; cursor: default; }
+  #codeBox { margin: 20px 0; padding: 16px; background: #f1f5f9; border-radius: 8px; }
+  #codeDisplay { font-size: 40px; letter-spacing: 6px; margin: 4px 0; font-weight: 700; }
+  #watchLink { font-size: 14px; color: #475569; word-break: break-all; }
+  video { width: 100%; margin-top: 20px; border-radius: 8px; background: #000; aspect-ratio: 16 / 9; }
+  a.back { display: inline-block; margin-bottom: 10px; color: #2563eb; text-decoration: none; }
+</style>
+</head>
+<body>
+  <a class="back" href="/">← Voltar</a>
+  <h1>Iniciar transmissão</h1>
+  <button id="startBtn">Compartilhar tela</button>
+
+  <div id="codeBox" style="display:none">
+    <p>Código da sala:</p>
+    <div id="codeDisplay"></div>
+    <p id="watchLink"></p>
+    <p id="viewerCount">Espectadores conectados: 0</p>
+  </div>
+
+  <video id="preview" autoplay muted playsinline></video>
+
+<script src="/clip-buffer.js"></script>
+<script src="/clip-recorder.js"></script>
+<script>
+const startBtn = document.getElementById('startBtn');
+const codeBox = document.getElementById('codeBox');
+const codeDisplay = document.getElementById('codeDisplay');
+const watchLink = document.getElementById('watchLink');
+const viewerCountEl = document.getElementById('viewerCount');
+const preview = document.getElementById('preview');
+
+let ws;
+let localStream;
+let clipRecorder;
+const peers = new Map(); // viewerId -> RTCPeerConnection
+
+const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+const MAX_WEBRTC_VIDEO_BITRATE = 8_000_000;
+const CLIP_VIDEO_BITRATE = 6_000_000;
+
+// Prefer H264 (usually hardware-encoded on the GPU) over the browser's default
+// VP8 (CPU only). Resolution, bitrate and frame rate are unchanged.
+function preferHardwareCodec(pc) {
+  const transceiver = pc.getTransceivers().find((t) => t.sender?.track?.kind === 'video');
+  if (!transceiver || typeof transceiver.setCodecPreferences !== 'function') return;
+  const codecs = RTCRtpSender.getCapabilities?.('video')?.codecs;
+  if (!codecs?.length) return;
+  const h264 = codecs.filter((c) => c.mimeType.toLowerCase() === 'video/h264');
+  if (h264.length === 0) return;
+  const others = codecs.filter((c) => c.mimeType.toLowerCase() !== 'video/h264');
+  try {
+    transceiver.setCodecPreferences([...h264, ...others]);
+  } catch (error) {
+    console.warn('Não foi possível definir preferência de codec:', error);
+  }
+}
+
+function sendSignal(message) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify(message));
+  return true;
+}
+
+function updateViewerCount() {
+  viewerCountEl.textContent = `Espectadores conectados: ${peers.size}`;
+}
+
+startBtn.addEventListener('click', async () => {
+  try {
+    localStream = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        width: { ideal: 1920, max: 1920 },
+        height: { ideal: 1080, max: 1080 },
+        frameRate: { ideal: 30, max: 30 },
+      },
+      audio: true,
+    });
+  } catch (err) {
+    alert('Não foi possível capturar a tela: ' + err.message);
+    return;
+  }
+
+  preview.srcObject = localStream;
+  const videoTrack = localStream.getVideoTracks()[0];
+  if ('contentHint' in videoTrack) videoTrack.contentHint = 'detail';
+  startBtn.disabled = true;
+  startBtn.textContent = 'Transmitindo...';
+
+  ws = new WebSocket(location.origin.replace(/^http/, 'ws'));
+
+  ws.onopen = () => sendSignal({ type: 'create-room' });
+
+  ws.onmessage = async (event) => {
+    const msg = JSON.parse(event.data);
+
+    if (msg.type === 'room-created') {
+      codeBox.style.display = 'block';
+      codeDisplay.textContent = msg.code;
+      watchLink.textContent = `${location.origin}/watch.html?code=${msg.code}`;
+    } else if (msg.type === 'viewer-joined') {
+      ensureClipRecorder();
+      await addViewer(msg.viewerId);
+    } else if (msg.type === 'answer') {
+      const pc = peers.get(msg.from);
+      if (pc) await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+    } else if (msg.type === 'ice-candidate') {
+      const pc = peers.get(msg.from);
+      if (pc && msg.candidate) {
+        try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (e) {}
+      }
+    } else if (msg.type === 'viewer-left') {
+      const pc = peers.get(msg.viewerId);
+      if (pc) { pc.close(); peers.delete(msg.viewerId); }
+      stopClipRecorderWithoutViewers();
+      updateViewerCount();
+    } else if (msg.type === 'clip-request') {
+      uploadRequestedClip(msg);
+    }
+  };
+
+  ws.onclose = () => {
+    if (localStream?.active) alert('Conexão com o servidor perdida. Recarregue para transmitir de novo.');
+  };
+
+  videoTrack.addEventListener('ended', () => {
+    clipRecorder?.stop();
+    localStream = null;
+    if (ws?.readyState === WebSocket.OPEN) ws.close();
+    location.reload();
+  });
+});
+
+function ensureClipRecorder() {
+  if (clipRecorder) return;
+  clipRecorder = new RollingClipRecorder(localStream, { videoBitsPerSecond: CLIP_VIDEO_BITRATE });
+  clipRecorder.start();
+}
+
+function stopClipRecorderWithoutViewers() {
+  if (peers.size > 0 || !clipRecorder) return;
+  clipRecorder.stop();
+  clipRecorder = null;
+}
+
+async function uploadRequestedClip({ requestId, duration }) {
+  if (!clipRecorder) {
+    sendSignal({ type: 'clip-upload-failed', requestId });
+    return;
+  }
+
+  try {
+    const selection = await clipRecorder.select(duration);
+    if (selection.segments.length === 0) throw new Error('Nenhum segmento disponível.');
+
+    const formData = new FormData();
+    selection.segments.forEach((segment, index) => {
+      formData.append('videos', segment.blob, `segmento-${index}.webm`);
+    });
+    formData.append('startOffsetMs', String(selection.startOffsetMs));
+    formData.append('segmentDurationsMs', JSON.stringify(selection.segments.map((s) => s.durationMs)));
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 240_000);
+    try {
+      const response = await fetch('/api/clips', {
+        method: 'POST',
+        headers: { 'X-Clip-Request': requestId },
+        body: formData,
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`Falha ao processar clipe (HTTP ${response.status}).`);
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (error) {
+    console.error('Erro ao preparar clipe solicitado:', error);
+    sendSignal({ type: 'clip-upload-failed', requestId });
+  }
+}
+
+async function addViewer(viewerId) {
+  const pc = new RTCPeerConnection({ iceServers });
+  peers.set(viewerId, pc);
+
+  const senders = localStream.getTracks().map((track) => pc.addTrack(track, localStream));
+  preferHardwareCodec(pc);
+  const videoSender = senders.find((s) => s.track?.kind === 'video');
+  if (videoSender) {
+    const parameters = videoSender.getParameters();
+    if (!parameters.encodings?.length) parameters.encodings = [{}];
+    parameters.encodings[0].maxBitrate = MAX_WEBRTC_VIDEO_BITRATE;
+    parameters.encodings[0].maxFramerate = 30;
+    await videoSender.setParameters(parameters).catch((error) => {
+      console.warn('O navegador não aplicou o limite de bitrate:', error);
+    });
+  }
+
+  pc.addEventListener('connectionstatechange', () => {
+    if (['failed', 'closed'].includes(pc.connectionState)) {
+      pc.close();
+      peers.delete(viewerId);
+      stopClipRecorderWithoutViewers();
+      updateViewerCount();
+    }
+  });
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) sendSignal({ type: 'ice-candidate', target: viewerId, candidate: event.candidate });
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  sendSignal({ type: 'offer', target: viewerId, sdp: offer });
+  updateViewerCount();
+}
+</script>
+</body>
+</html>
