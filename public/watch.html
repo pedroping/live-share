@@ -97,21 +97,47 @@ joinBtn.addEventListener('click', async () => {
     return;
   }
 
+  openSocket(code, false);
+});
+
+let viewerId = null;
+let resumeStartedAt = 0;
+
+// Opens the signaling socket. With resume=true it rejoins after a dropped
+// connection (server restart, network blip) under the same viewer id; the
+// video itself is peer-to-peer and never stopped.
+function openSocket(code, resume) {
   const socket = new WebSocket(location.origin.replace(/^http/, 'ws'));
   ws = socket;
 
   socket.onopen = () => {
     if (ws !== socket) return socket.close();
-    socket.send(JSON.stringify({ type: 'join-room', code }));
+    socket.send(JSON.stringify(resume ? { type: 'join-room', code, resume: true, viewerId } : { type: 'join-room', code }));
   };
 
   socket.onmessage = async (event) => {
     const msg = JSON.parse(event.data);
 
     if (msg.type === 'error') {
+      if (resume && msg.code === 'not-found') {
+        // The broadcaster hasn't reclaimed the room yet (e.g. server restarted).
+        socket.onclose = null;
+        socket.close();
+        if (Date.now() - resumeStartedAt > 90_000 && pc?.connectionState !== 'connected') {
+          alert('A transmissão foi encerrada.');
+          location.href = '/watch.html';
+          return;
+        }
+        setTimeout(() => openSocket(code, true), 3000);
+        return;
+      }
       errorMsg.textContent = msg.message;
       socket.close();
     } else if (msg.type === 'joined') {
+      viewerId = msg.viewerId;
+      resumeStartedAt = 0;
+      serverStatus.textContent = '';
+      if (msg.resumed) return; // already watching
       joinedRoom = true;
       ServerWake.keepAlive('');
       joinBox.style.display = 'none';
@@ -153,9 +179,20 @@ joinBtn.addEventListener('click', async () => {
     if (!joinedRoom) {
       joinBtn.disabled = false;
       joinBtn.textContent = 'Entrar';
+      return;
     }
+    // Keep watching; rejoin in the background.
+    if (pendingClipTimeout) {
+      clipStatus.textContent = 'A conexão com o servidor caiu durante o clipe. Tente de novo.';
+      finishClipRequest();
+    }
+    if (!resumeStartedAt) resumeStartedAt = Date.now();
+    setTimeout(async () => {
+      await ServerWake.wakeServer('', { maxWaitMs: 90_000 });
+      openSocket(code, true);
+    }, 1500);
   };
-});
+}
 
 function setupPeerConnection() {
   pc = new RTCPeerConnection({ iceServers });

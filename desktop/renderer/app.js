@@ -366,7 +366,12 @@ function stopLive(reason) {
   state.clipRecorder = null;
   for (const pc of peers.values()) pc.close();
   peers.clear();
-  if (state.ws) { state.ws.onclose = null; state.ws.close(); state.ws = null; }
+  if (state.ws) {
+    sendSignal({ type: 'end-room' }); // tell viewers right away
+    state.ws.onclose = null;
+    state.ws.close();
+    state.ws = null;
+  }
   state.displayStream?.getTracks().forEach((t) => t.stop());
   state.displayStream = null;
   liveShare.setAudioMode({ type: 'off' });
@@ -420,11 +425,16 @@ function sendSignal(message) {
 function connectSignaling() {
   const ws = new WebSocket(server().replace(/^http/, 'ws'));
   state.ws = ws;
-  ws.onopen = () => sendSignal({ type: 'create-room' });
+  // After a drop, reclaim the same room (code + secret token) so the link
+  // friends already have keeps working.
+  ws.onopen = () => sendSignal({ type: 'create-room', code: state.code, token: state.token });
   ws.onmessage = async (event) => {
     const msg = JSON.parse(event.data);
     if (msg.type === 'room-created') {
+      if (state.code && state.code !== msg.code) console.warn('room code changed ' + state.code + ' -> ' + msg.code);
       state.code = msg.code;
+      state.token = msg.token;
+      $('reconnectNote').hidden = true;
       $('code').textContent = msg.code;
       $('watchLink').textContent = `${server()}/watch.html?code=${msg.code}`;
       console.log('LIVESHARE_ROOM ' + msg.code);
@@ -438,29 +448,31 @@ function connectSignaling() {
       const pc = peers.get(msg.from);
       if (pc && msg.candidate) { try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch {} }
     } else if (msg.type === 'viewer-left') {
+      // Their signaling socket closed. If the video link is still up it was
+      // only a network blip (they will rejoin); a closed tab drops the
+      // WebRTC connection within seconds and gets cleaned up here.
       const pc = peers.get(msg.viewerId);
-      if (pc) { pc.close(); peers.delete(msg.viewerId); }
-      stopClipRecorderWithoutViewers();
-      updateViewers();
+      setTimeout(() => {
+        if (!pc || peers.get(msg.viewerId) !== pc || pc.connectionState === 'connected') return;
+        pc.close();
+        peers.delete(msg.viewerId);
+        stopClipRecorderWithoutViewers();
+        updateViewers();
+      }, 10_000);
     } else if (msg.type === 'clip-request') {
       uploadRequestedClip(msg);
     }
   };
-  ws.onclose = () => {
-    if (!state.live) return;
-    $('code').textContent = '····';
-    $('watchLink').textContent = 'Reconectando ao servidor…';
-    // The server may have restarted or slept: wake it, then open a new room.
+  ws.onclose = (event) => {
+    console.warn(`signaling closed code=${event.code} reason=${event.reason || '-'} live=${state.live}`);
+    if (!state.live || state.ws !== ws) return;
+    // Viewers are connected peer-to-peer, so the stream keeps going; just
+    // wake/reach the server again and reclaim the room.
+    $('reconnectNote').hidden = false;
     setTimeout(async () => {
-      if (!state.live) return;
-      peers.forEach((pc) => pc.close());
-      peers.clear();
-      updateViewers();
-      while (state.live && !(await ensureServer())) {
-        $('watchLink').textContent = 'Servidor fora do ar, tentando de novo…';
-      }
-      if (state.live) connectSignaling();
-    }, 2000);
+      while (state.live && !(await ensureServer())) { /* keep trying */ }
+      if (state.live && state.ws === ws) connectSignaling();
+    }, 1500);
   };
 }
 
@@ -574,3 +586,6 @@ async function uploadRequestedClip({ requestId, duration }) {
   }
   await applyAudio(); // start the level meter with the default (exclude Discord)
 })();
+
+// Closing the window ends the room right away instead of after the grace period.
+window.addEventListener('beforeunload', () => { if (state.live) sendSignal({ type: 'end-room' }); });

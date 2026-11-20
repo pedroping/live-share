@@ -15,6 +15,7 @@ const TMP_DIR = path.join(DATA_DIR, 'tmp');
 const INDEX_FILE = path.join(DATA_DIR, 'clips.json');
 const CLIP_REQUEST_TIMEOUT_MS = 240_000;
 const MAX_CLIP_SECONDS = 60;
+const ROOM_GRACE_MS = 45_000; // how long a room waits for its broadcaster to reconnect
 
 for (const dir of [DATA_DIR, CLIPS_DIR, TMP_DIR]) fs.mkdirSync(dir, { recursive: true });
 
@@ -102,16 +103,16 @@ app.post('/api/clips', upload.array('videos', 40), async (req, res) => {
     try { durations = JSON.parse(req.body.segmentDurationsMs || '[]'); } catch {}
 
     const id = crypto.randomBytes(8).toString('hex');
-    const videoName = `${id}.mp4`;
     const posterName = `${id}.jpg`;
-    await renderClip({
+    // One clip at a time: the free instance has 0.1 CPU and 512 MB.
+    const videoName = await enqueueClip(() => renderClip({
       files,
       durations,
       startOffsetMs,
       duration: pending.duration,
-      output: path.join(CLIPS_DIR, videoName),
+      outputBase: path.join(CLIPS_DIR, id),
       poster: path.join(CLIPS_DIR, posterName),
-    });
+    }));
 
     const clip = {
       url: `/media/${videoName}`,
@@ -144,15 +145,18 @@ function runFfmpeg(args) {
   });
 }
 
-// Read resolution and whether there is an audio stream ("ffmpeg -i" prints it).
+// Read codec, resolution and whether there is audio ("ffmpeg -i" prints it).
 function probe(file) {
   return new Promise((resolve) => {
     execFile(ffmpegPath, ['-hide_banner', '-i', file], (_err, _out, stderr = '') => {
-      const size = stderr.match(/Video:.*?(\d{2,5})x(\d{2,5})/);
+      const video = stderr.match(/Video: (\w+).*?(\d{2,5})x(\d{2,5})/);
+      const audio = stderr.match(/Audio: (\w+)/);
       resolve({
-        width: size ? Number(size[1]) : 0,
-        height: size ? Number(size[2]) : 0,
-        hasAudio: /Stream #.*Audio:/.test(stderr),
+        vcodec: video ? video[1] : '',
+        width: video ? Number(video[2]) : 0,
+        height: video ? Number(video[3]) : 0,
+        acodec: audio ? audio[1] : '',
+        hasAudio: !!audio,
       });
     });
   });
@@ -160,54 +164,90 @@ function probe(file) {
 
 const even = (n) => Math.max(2, Math.floor(n / 2) * 2);
 
-// Join the WebM segments (each a standalone MediaRecorder file), cut away the
-// extra lead-in, and encode one MP4 + a poster frame. Segments may come from
-// different sources (the broadcaster can switch mid-stream), so each one is
-// normalized to the same size/fps and gets silent audio if it has none.
-async function renderClip({ files, durations, startOffsetMs, duration, output, poster }) {
+let clipQueue = Promise.resolve();
+function enqueueClip(job) {
+  const run = clipQueue.then(job, job);
+  clipQueue = run.catch(() => {});
+  return run;
+}
+
+// Join the WebM segments (each a standalone MediaRecorder file) into one clip
+// and grab a poster frame. Returns the clip's file name.
+//
+// Fast path (normal case, all segments from the same source): stream-copy
+// concat, no re-encoding, so it is nearly free in CPU and memory. It keeps
+// whole segments, so the clip can run up to one segment (~5s) longer.
+//
+// Slow path (the broadcaster switched source mid-clip, so sizes/codecs
+// differ): normalize to 720p and re-encode with the lightest settings.
+async function renderClip({ files, durations, startOffsetMs, duration, outputBase, poster }) {
   const info = await Promise.all(files.map((f) => probe(f.path)));
-  const first = info.find((i) => i.width && i.height) || { width: 1280, height: 720 };
-  let W = first.width;
-  let H = first.height;
-  const fit = Math.min(1, 1920 / W, 1080 / H);
-  W = even(W * fit);
-  H = even(H * fit);
+  const same = info.every((i) => i.vcodec === info[0].vcodec && i.width === info[0].width
+    && i.height === info[0].height && i.acodec === info[0].acodec);
+  console.log(`clip: ${files.length} segments, ${same ? 'stream copy' : 're-encode'} ` +
+    JSON.stringify(info.map((i) => `${i.vcodec} ${i.width}x${i.height} ${i.acodec || 'no-audio'}`)));
 
-  const inputs = [];
-  const filters = [];
-  const pairs = [];
-  files.forEach((f, i) => {
-    inputs.push('-i', f.path);
-    const d = Number(durations[i]) > 0 ? (Number(durations[i]) / 1000).toFixed(3) : '5';
-    filters.push(
-      `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
-      `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,` +
-      `tpad=stop_mode=clone:stop_duration=1,trim=duration=${d},setpts=PTS-STARTPTS[v${i}]`,
-    );
-    filters.push(info[i].hasAudio
-      ? `[${i}:a]aformat=sample_rates=48000:channel_layouts=stereo,apad,atrim=duration=${d},asetpts=PTS-STARTPTS[a${i}]`
-      : `anullsrc=r=48000:cl=stereo,atrim=duration=${d}[a${i}]`);
-    pairs.push(`[v${i}][a${i}]`);
-  });
-  const start = (startOffsetMs / 1000).toFixed(3);
-  filters.push(`${pairs.join('')}concat=n=${files.length}:v=1:a=1[vc][ac]`);
-  filters.push(`[vc]trim=start=${start}:duration=${duration},setpts=PTS-STARTPTS[vo]`);
-  filters.push(`[ac]atrim=start=${start}:duration=${duration},asetpts=PTS-STARTPTS[ao]`);
-
+  let output;
+  if (same && info[0].vcodec) {
+    output = `${outputBase}.webm`;
+    const listFile = `${outputBase}.txt`;
+    fs.writeFileSync(listFile, files.map((f, i) => {
+      const line = `file '${f.path.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`;
+      const d = Number(durations[i]);
+      // MediaRecorder WebMs have no duration header; pass the measured one.
+      return d > 0 ? `${line}\nduration ${(d / 1000).toFixed(3)}` : line;
+    }).join('\n'));
+    try {
+      await runFfmpeg([
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-fflags', '+genpts', '-f', 'concat', '-safe', '0', '-i', listFile,
+        '-c', 'copy', output,
+      ]);
+    } finally {
+      fs.rm(listFile, { force: true }, () => {});
+    }
+  } else {
+    output = `${outputBase}.mp4`;
+    const first = info.find((i) => i.width && i.height) || { width: 1280, height: 720 };
+    const fit = Math.min(1, 1280 / first.width, 720 / first.height);
+    const W = even(first.width * fit);
+    const H = even(first.height * fit);
+    const inputs = [];
+    const filters = [];
+    const pairs = [];
+    files.forEach((f, i) => {
+      inputs.push('-i', f.path);
+      const d = Number(durations[i]) > 0 ? (Number(durations[i]) / 1000).toFixed(3) : '5';
+      filters.push(
+        `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
+        `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,` +
+        `tpad=stop_mode=clone:stop_duration=1,trim=duration=${d},setpts=PTS-STARTPTS[v${i}]`,
+      );
+      filters.push(info[i].hasAudio
+        ? `[${i}:a]aformat=sample_rates=48000:channel_layouts=stereo,apad,atrim=duration=${d},asetpts=PTS-STARTPTS[a${i}]`
+        : `anullsrc=r=48000:cl=stereo,atrim=duration=${d}[a${i}]`);
+      pairs.push(`[v${i}][a${i}]`);
+    });
+    const start = (startOffsetMs / 1000).toFixed(3);
+    filters.push(`${pairs.join('')}concat=n=${files.length}:v=1:a=1[vc][ac]`);
+    filters.push(`[vc]trim=start=${start}:duration=${duration},setpts=PTS-STARTPTS[vo]`);
+    filters.push(`[ac]atrim=start=${start}:duration=${duration},asetpts=PTS-STARTPTS[ao]`);
+    await runFfmpeg([
+      '-y', '-hide_banner', '-loglevel', 'error', '-threads', '1',
+      ...inputs,
+      '-filter_complex', filters.join(';'), '-filter_complex_threads', '1',
+      '-map', '[vo]', '-map', '[ao]',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26', '-threads', '1',
+      '-c:a', 'aac', '-b:a', '128k',
+      '-movflags', '+faststart',
+      output,
+    ]);
+  }
   await runFfmpeg([
-    '-y', '-hide_banner', '-loglevel', 'error',
-    ...inputs,
-    '-filter_complex', filters.join(';'),
-    '-map', '[vo]', '-map', '[ao]',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
-    '-c:a', 'aac', '-b:a', '160k',
-    '-movflags', '+faststart',
-    output,
-  ]);
-  await runFfmpeg([
-    '-y', '-hide_banner', '-loglevel', 'error',
+    '-y', '-hide_banner', '-loglevel', 'error', '-threads', '1',
     '-i', output, '-frames:v', '1', '-vf', 'scale=640:-2', poster,
   ]);
+  return path.basename(output);
 }
 
 // ---------- WebSocket signaling ----------
@@ -229,12 +269,38 @@ wss.on('connection', (ws) => {
     switch (msg.type) {
       case 'create-room': {
         if (ws.role) return;
-        const code = newRoomCode();
-        rooms.set(code, { broadcaster: ws, viewers: new Map() });
+        // A broadcaster whose connection dropped (or whose server restarted)
+        // asks for its old code back; viewers keep watching peer-to-peer.
+        const wanted = String(msg.code || '').toUpperCase();
+        const existing = rooms.get(wanted);
+        let code;
+        let resumed = false;
+        if (existing && msg.token && existing.token === msg.token) {
+          clearTimeout(existing.orphanTimer);
+          existing.orphanTimer = null;
+          const previous = existing.broadcaster;
+          existing.broadcaster = ws;
+          if (previous && previous !== ws) previous.terminate();
+          code = wanted;
+          resumed = true;
+        } else if (/^[A-Z2-9]{4}$/.test(wanted) && !existing && msg.token) {
+          code = wanted; // server restarted: the room is gone, recreate it
+          rooms.set(code, { broadcaster: ws, viewers: new Map(), token: msg.token });
+          resumed = true;
+        } else {
+          code = newRoomCode();
+          rooms.set(code, { broadcaster: ws, viewers: new Map(), token: crypto.randomBytes(16).toString('hex') });
+        }
         ws.role = 'broadcaster';
         ws.code = code;
-        send(ws, { type: 'room-created', code });
-        console.log(`room ${code} created`);
+        send(ws, { type: 'room-created', code, token: rooms.get(code).token, resumed });
+        console.log(`room ${code} ${resumed ? 'resumed' : 'created'}`);
+        break;
+      }
+
+      case 'end-room': {
+        if (ws.role !== 'broadcaster' || !room || room.broadcaster !== ws) return;
+        endRoom(ws.code);
         break;
       }
 
@@ -242,14 +308,19 @@ wss.on('connection', (ws) => {
         if (ws.role) return;
         const code = String(msg.code || '').trim().toUpperCase();
         const target = rooms.get(code);
-        if (!target) return send(ws, { type: 'error', message: 'Sala não encontrada. Confira o código.' });
-        const viewerId = crypto.randomUUID();
+        if (!target) return send(ws, { type: 'error', code: 'not-found', message: 'Sala não encontrada. Confira o código.' });
+        // A viewer whose signaling connection dropped rejoins under its old id
+        // without a new WebRTC negotiation (its video never stopped).
+        const resume = !!msg.resume && typeof msg.viewerId === 'string' && msg.viewerId.length <= 64;
+        const viewerId = resume ? msg.viewerId : crypto.randomUUID();
+        const previous = target.viewers.get(viewerId);
         ws.role = 'viewer';
         ws.code = code;
         ws.viewerId = viewerId;
         target.viewers.set(viewerId, ws);
-        send(ws, { type: 'joined', code });
-        send(target.broadcaster, { type: 'viewer-joined', viewerId });
+        if (previous && previous !== ws) previous.terminate();
+        send(ws, { type: 'joined', code, viewerId, resumed: resume });
+        if (!resume) send(target.broadcaster, { type: 'viewer-joined', viewerId });
         break;
       }
 
@@ -277,6 +348,9 @@ wss.on('connection', (ws) => {
 
       case 'clip-request': {
         if (ws.role !== 'viewer' || !room) return;
+        if (!room.broadcaster) {
+          return send(ws, { type: 'clip-error', message: 'O transmissor está reconectando. Tente de novo em instantes.' });
+        }
         const duration = Math.min(MAX_CLIP_SECONDS, Math.max(5, Number(msg.duration) || 30));
         const requestId = crypto.randomUUID();
         const timer = setTimeout(
@@ -305,18 +379,33 @@ wss.on('connection', (ws) => {
     if (!room) return;
 
     if (ws.role === 'broadcaster' && room.broadcaster === ws) {
-      for (const viewer of room.viewers.values()) send(viewer, { type: 'broadcast-ended' });
+      // Don't end the room on a dropped connection: the broadcaster's app
+      // reconnects and reclaims it, and viewers keep watching meanwhile.
+      // An explicit 'end-room' (Encerrar) ends it immediately.
+      room.broadcaster = null;
       for (const [id, req] of clipRequests) {
-        if (req.code === ws.code) failClipRequest(id, 'A transmissão foi encerrada.');
+        if (req.code === ws.code) failClipRequest(id, 'A conexão do transmissor caiu. Tente clipar de novo.');
       }
-      rooms.delete(ws.code);
-      console.log(`room ${ws.code} closed`);
-    } else if (ws.role === 'viewer') {
+      room.orphanTimer = setTimeout(() => endRoom(ws.code), ROOM_GRACE_MS);
+      console.log(`room ${ws.code} waiting for broadcaster`);
+    } else if (ws.role === 'viewer' && room.viewers.get(ws.viewerId) === ws) {
       room.viewers.delete(ws.viewerId);
       send(room.broadcaster, { type: 'viewer-left', viewerId: ws.viewerId });
     }
   });
 });
+
+function endRoom(code) {
+  const room = rooms.get(code);
+  if (!room) return;
+  clearTimeout(room.orphanTimer);
+  for (const viewer of room.viewers.values()) send(viewer, { type: 'broadcast-ended' });
+  for (const [id, req] of clipRequests) {
+    if (req.code === code) failClipRequest(id, 'A transmissão foi encerrada.');
+  }
+  rooms.delete(code);
+  console.log(`room ${code} closed`);
+}
 
 // Drop dead sockets (keeps hosts like Render from holding zombie rooms).
 setInterval(() => {

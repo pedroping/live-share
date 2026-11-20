@@ -333,7 +333,7 @@ function onCaptureEnded() {
   clipRecorder?.stop();
   broadcasting = false;
   deviceStream?.getTracks().forEach((t) => t.stop());
-  if (ws?.readyState === WebSocket.OPEN) ws.close();
+  if (ws?.readyState === WebSocket.OPEN) { sendSignal({ type: 'end-room' }); ws.close(); }
   location.reload();
 }
 
@@ -420,15 +420,23 @@ async function swapTracks(pc, stream) {
 }
 
 // ---------- signaling ----------
-function connectSignaling() {
-  ws = new WebSocket(location.origin.replace(/^http/, 'ws'));
+let roomCode = null;
+let roomToken = null;
 
-  ws.onopen = () => sendSignal({ type: 'create-room' });
+function connectSignaling() {
+  const socket = new WebSocket(location.origin.replace(/^http/, 'ws'));
+  ws = socket;
+
+  // After a drop, reclaim the same room so the shared link keeps working.
+  ws.onopen = () => sendSignal({ type: 'create-room', code: roomCode, token: roomToken });
 
   ws.onmessage = async (event) => {
     const msg = JSON.parse(event.data);
 
     if (msg.type === 'room-created') {
+      roomCode = msg.code;
+      roomToken = msg.token;
+      document.getElementById('serverStatus').textContent = '';
       codeBox.style.display = 'block';
       codeDisplay.textContent = msg.code;
       watchLink.textContent = `${location.origin}/watch.html?code=${msg.code}`;
@@ -444,17 +452,32 @@ function connectSignaling() {
         try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (e) {}
       }
     } else if (msg.type === 'viewer-left') {
+      // Only a network blip if their video link is still up (they rejoin);
+      // a closed tab drops the WebRTC connection within seconds.
       const pc = peers.get(msg.viewerId);
-      if (pc) { pc.close(); peers.delete(msg.viewerId); }
-      stopClipRecorderWithoutViewers();
-      updateViewerCount();
+      setTimeout(() => {
+        if (!pc || peers.get(msg.viewerId) !== pc || pc.connectionState === 'connected') return;
+        pc.close();
+        peers.delete(msg.viewerId);
+        stopClipRecorderWithoutViewers();
+        updateViewerCount();
+      }, 10_000);
     } else if (msg.type === 'clip-request') {
       uploadRequestedClip(msg);
     }
   };
 
   ws.onclose = () => {
-    if (broadcasting) alert('Conexão com o servidor perdida. Recarregue para transmitir de novo.');
+    if (!broadcasting || ws !== socket) return;
+    // Viewers are peer-to-peer and keep watching; reconnect and reclaim the room.
+    const serverStatus = document.getElementById('serverStatus');
+    serverStatus.textContent = 'Reconectando ao servidor… quem já está assistindo continua vendo normalmente.';
+    setTimeout(async () => {
+      while (broadcasting && !(await ServerWake.wakeServer('', {
+        onStatus: (s) => { if (s.state === 'waking') serverStatus.textContent = ServerWake.describe(s); },
+      }))) { /* keep trying */ }
+      if (broadcasting && ws === socket) connectSignaling();
+    }, 1500);
   };
 }
 
@@ -557,6 +580,8 @@ async function addViewer(viewerId) {
   await sendOffer(pc);
   updateViewerCount();
 }
+
+window.addEventListener('pagehide', () => { if (broadcasting) sendSignal({ type: 'end-room' }); });
 </script>
 </body>
 </html>
