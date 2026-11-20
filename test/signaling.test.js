@@ -189,3 +189,20 @@ test('uploading for an unknown clip request is rejected', async () => {
   const res = await fetch(`${server.base}/api/clips`, { method: 'POST', headers: { 'X-Clip-Request': 'nope' }, body: form });
   assert.equal(res.status, 404);
 });
+
+test('a room whose broadcaster never comes back ends after the grace period', async () => {
+  const quick = await startServer({ env: { ROOM_GRACE_MS: '800' } });
+  try {
+    const broadcaster = await connect(quick.wsUrl);
+    broadcaster.send({ type: 'create-room' });
+    const { code } = await broadcaster.next('room-created');
+    const viewer = await connect(quick.wsUrl);
+    viewer.send({ type: 'join-room', code });
+    await viewer.next('joined');
+    await broadcaster.close();
+    await viewer.next('broadcast-ended', 3000);
+    await viewer.close();
+  } finally {
+    await quick.stop();
+  }
+});
