@@ -60,6 +60,15 @@ app.use('/media', express.static(CLIPS_DIR, { maxAge: '7d' }));
 
 app.get('/healthz', (req, res) => res.send('ok'));
 
+// The desktop broadcaster runs from file:// and uploads clips cross-origin.
+app.use('/api', (req, res, next) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Headers', 'X-Clip-Request, Content-Type');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 app.get('/api/clips', (req, res) => {
   const limit = Math.max(0, parseInt(req.query.limit, 10) || 0);
   const clips = readClips();

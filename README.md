@@ -35,3 +35,7 @@ Render provides HTTPS, which screen capture requires, and passes WebSockets thro
 - Only a public STUN server is configured. Viewers behind strict NATs need a TURN server added to `iceServers` in `broadcast.html` and `watch.html`.
 - Clips are stored on local disk. On hosts with ephemeral disks (Render free tier, etc.) mount a persistent disk at `DATA_DIR` or swap the storage for S3/Cloudinary in `server.js`.
 - Each viewer gets their own peer connection from the broadcaster, so upload bandwidth scales with viewer count (~8 Mbps cap each).
+
+## Desktop app (Windows)
+
+`desktop/` contains an Electron broadcaster with a Discord-style source picker and **per-app audio**, so it can stream all your PC audio *except Discord*. See [desktop/README.md](desktop/README.md).
