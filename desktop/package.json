@@ -20,6 +20,7 @@
     "productName": "Live Share",
     "files": [
       "main.js",
+      "audio-capture.js",
       "preload.js",
       "renderer/**/*"
     ],

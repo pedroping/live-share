@@ -12,6 +12,7 @@
     --accent: #5865f2; --accent-hover: #4752c4; --live: #da373c; --ok: #23a55a; --warn: #f0b232;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; } /* elements with display:flex would ignore `hidden` */
   html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
@@ -184,10 +185,18 @@
     <div class="grid"></div>
   </template>
 
+<!-- Shared with the website (copied from public/js by scripts/sync-shared.js) -->
 <script src="shared/server-wake.js"></script>
 <script src="shared/clip-buffer.js"></script>
 <script src="shared/clip-recorder.js"></script>
+<script src="shared/broadcast-session.js"></script>
+<!-- Desktop app -->
 <script src="pcm-worklet.js"></script>
-<script src="app.js"></script>
+<script src="js/state.js"></script>
+<script src="js/server-status.js"></script>
+<script src="js/source-picker.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/live.js"></script>
+<script src="js/main.js"></script>
 </body>
 </html>
