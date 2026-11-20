@@ -1,5 +1,5 @@
 // Audio worklet that plays 16-bit stereo PCM pushed from the main process.
-// Wrapped in a function so app.js can load it from a Blob URL (file:// pages
+// Wrapped in a function so js/audio.js can load it from a Blob URL (file:// pages
 // cannot addModule() a file directly).
 function pcmWorkletModule() {
   class PcmPlayer extends AudioWorkletProcessor {

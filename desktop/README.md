@@ -32,7 +32,36 @@ npm approve-scripts electron   # npm 11+: lets Electron download its binary
 npm start
 ```
 
-`npm start` copies the shared clip recorder from `../public` and compiles `native/AppAudio.cs` into `appaudio.exe`. It uses the C# compiler that ships with Windows (.NET Framework 4.x), so there is nothing extra to install.
+`npm start` copies the broadcaster code shared with the website (`../public/js` → `renderer/shared/`) and compiles `native/AppAudio.cs` into `appaudio.exe`. It uses the C# compiler that ships with Windows (.NET Framework 4.x), so there is nothing extra to install.
+
+## Project layout
+
+```
+main.js               Electron main process: window, screen/window list, IPC
+audio-capture.js      runs native/appaudio.exe for the chosen audio mode, forwards PCM
+preload.js            the small `liveShare` API the UI is allowed to call
+native/AppAudio.cs    per-app audio capture (Windows process loopback)
+renderer/
+  index.html          the UI (styles inline)
+  pcm-worklet.js      turns PCM from appaudio.exe into an audio track
+  js/state.js         settings, quality presets, app state (read this first)
+  js/server-status.js wakes the server, header status pill
+  js/source-picker.js grid of screens/windows with live thumbnails
+  js/audio.js         audio source choice and level meter
+  js/live.js          go live, switch source, stop
+  js/main.js          startup
+  shared/             copied from ../public/js (not committed): BroadcastSession etc.
+scripts/              sync-shared.js, build-native.js
+test/                 appaudio.test.js (npm test), e2e.js (npm run test:e2e)
+```
+
+## Tests
+
+```bash
+npm test           # per-app audio isolation: plays a quiet 440 Hz tone for a few seconds
+npm run test:e2e   # desktop app and web page broadcasting to a viewer through a local server,
+                   # server killed mid-stream, clips (captures your screen in hidden windows)
+```
 
 ## Build the installer
 
