@@ -2,6 +2,13 @@
 
 A Discord-style screen-share app for Windows that streams to the live-share website. Viewers just open the link in a browser.
 
+## Download
+
+- [LiveShare-Setup-1.0.0.exe](https://github.com/pedroping/live-share/releases/latest/download/LiveShare-Setup-1.0.0.exe): installer
+- [LiveShare-Portable-1.0.0.exe](https://github.com/pedroping/live-share/releases/latest/download/LiveShare-Portable-1.0.0.exe): runs without installing
+
+The builds are unsigned, so Windows SmartScreen will warn on first run: choose *More info → Run anyway*.
+
 ## What it adds over the web broadcaster
 
 - **Discord-style picker**: a grid of your windows and screens with live thumbnails.

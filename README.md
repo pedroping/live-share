@@ -39,3 +39,5 @@ Render provides HTTPS, which screen capture requires, and passes WebSockets thro
 ## Desktop app (Windows)
 
 `desktop/` contains an Electron broadcaster with a Discord-style source picker and **per-app audio**, so it can stream all your PC audio *except Discord*. See [desktop/README.md](desktop/README.md).
+
+**Download:** [Installer](https://github.com/pedroping/live-share/releases/latest/download/LiveShare-Setup-1.0.0.exe) · [Portable](https://github.com/pedroping/live-share/releases/latest/download/LiveShare-Portable-1.0.0.exe) · [All releases](https://github.com/pedroping/live-share/releases)
