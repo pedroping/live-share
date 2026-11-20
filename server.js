@@ -58,6 +58,8 @@ const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/media', express.static(CLIPS_DIR, { maxAge: '7d' }));
 
+app.get('/healthz', (req, res) => res.send('ok'));
+
 app.get('/api/clips', (req, res) => {
   const limit = Math.max(0, parseInt(req.query.limit, 10) || 0);
   const clips = readClips();

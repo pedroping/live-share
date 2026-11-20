@@ -22,6 +22,14 @@ Open http://localhost:3000. Screen capture needs HTTPS or localhost.
 | `DATA_DIR` | `./data` | clips, index, temp uploads |
 | `FFMPEG_PATH` | bundled `ffmpeg-static` | use a system ffmpeg instead |
 
+## Deploy on Render
+
+1. In Render, click **New → Blueprint** and pick this repo. It reads `render.yaml`.
+   (Or **New → Web Service** with build `npm ci` and start `npm start`.)
+2. Open `https://<your-service>.onrender.com/`. The pages are `/broadcast.html`, `/watch.html` and `/clips.html`.
+
+Render provides HTTPS, which screen capture requires, and passes WebSockets through on the same port.
+
 ## Notes
 
 - Only a public STUN server is configured. Viewers behind strict NATs need a TURN server added to `iceServers` in `broadcast.html` and `watch.html`.
