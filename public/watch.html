@@ -17,6 +17,8 @@
   button:disabled { background: #86efac; cursor: default; }
   video { width: 100%; margin-top: 20px; border-radius: 8px; background: #000; }
   #errorMsg { color: #dc2626; margin-top: 10px; }
+  #serverStatus { color: #b45309; font-size: 14px; margin-top: 6px; }
+  #serverStatus:empty, #errorMsg:empty { display: none; }
   #clipBar { margin-top: 14px; display: none; }
   #clipBar button { background: #7c3aed; font-size: 15px; padding: 10px 16px; margin: 4px; }
   #clipBar button:disabled { background: #c4b5fd; }
@@ -32,6 +34,7 @@
     <input id="codeInput" placeholder="Código" maxlength="4" autocomplete="off">
     <button id="joinBtn">Entrar</button>
     <p id="errorMsg"></p>
+    <p id="serverStatus"></p>
   </div>
 
   <video id="remoteVideo" autoplay playsinline controls style="display:none"></video>
@@ -44,6 +47,7 @@
 
   <p><a href="/clips.html">Ver todos os clipes salvos →</a></p>
 
+<script src="/server-wake.js"></script>
 <script>
 const joinBtn = document.getElementById('joinBtn');
 const codeInput = document.getElementById('codeInput');
@@ -54,6 +58,7 @@ const clipBar = document.getElementById('clipBar');
 const clip30Btn = document.getElementById('clip30Btn');
 const clip60Btn = document.getElementById('clip60Btn');
 const clipStatus = document.getElementById('clipStatus');
+const serverStatus = document.getElementById('serverStatus');
 
 const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
 let ws, pc;
@@ -72,13 +77,25 @@ function sendSignal(message) {
   return true;
 }
 
-joinBtn.addEventListener('click', () => {
+joinBtn.addEventListener('click', async () => {
   if (joinBtn.disabled) return;
   const code = codeInput.value.trim().toUpperCase();
   if (!code) return;
   errorMsg.textContent = '';
   joinBtn.disabled = true;
   joinBtn.textContent = 'Conectando...';
+
+  // Wake the free server first if it went to sleep.
+  const awake = await ServerWake.wakeServer('', {
+    onStatus: (s) => { serverStatus.textContent = ServerWake.describe(s); },
+  });
+  if (!awake) {
+    serverStatus.textContent = '';
+    errorMsg.textContent = ServerWake.describe({ state: 'offline' });
+    joinBtn.disabled = false;
+    joinBtn.textContent = 'Entrar';
+    return;
+  }
 
   const socket = new WebSocket(location.origin.replace(/^http/, 'ws'));
   ws = socket;
@@ -96,6 +113,7 @@ joinBtn.addEventListener('click', () => {
       socket.close();
     } else if (msg.type === 'joined') {
       joinedRoom = true;
+      ServerWake.keepAlive('');
       joinBox.style.display = 'none';
       remoteVideo.style.display = 'block';
       setupPeerConnection();

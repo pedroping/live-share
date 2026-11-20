@@ -5,10 +5,26 @@ function escapeHtml(value) {
   }[c]));
 }
 
+async function fetchClips(limit) {
+  const res = await fetch(limit ? `/api/clips?limit=${limit}` : '/api/clips', { cache: 'no-store' });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
+}
+
 async function renderClips({ statusEl, grid, limit, emptyText }) {
   try {
-    const res = await fetch(limit ? `/api/clips?limit=${limit}` : '/api/clips');
-    const { clips = [] } = await res.json();
+    let data;
+    try {
+      data = await fetchClips(limit);
+    } catch {
+      // Server asleep (Render free plan) or restarting: wake it, then retry.
+      const awake = await ServerWake.wakeServer('', {
+        onStatus: (s) => { statusEl.textContent = ServerWake.describe(s) || 'Carregando...'; },
+      });
+      if (!awake) throw new Error('offline');
+      data = await fetchClips(limit);
+    }
+    const { clips = [] } = data;
 
     if (clips.length === 0) {
       statusEl.textContent = emptyText;

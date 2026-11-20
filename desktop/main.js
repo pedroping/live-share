@@ -165,6 +165,9 @@ ipcMain.handle('apps:list', async () => {
     .sort((a, b) => a.name.localeCompare(b.name));
 });
 
+ipcMain.handle('process:alive', (_e, pid) => {
+  try { process.kill(Number(pid), 0); return true; } catch (e) { return e.code === 'EPERM'; }
+});
 ipcMain.handle('discord:status', async () => (await findDiscordRoots()).length > 0);
 ipcMain.handle('clipboard:write', (_e, text) => clipboard.writeText(String(text)));
 ipcMain.handle('open:external', (_e, url) => {

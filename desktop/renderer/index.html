@@ -25,6 +25,10 @@
   .pill { font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 4px; background: var(--line); color: var(--muted); }
   .pill.live { background: var(--live); color: white; }
   header .spacer { flex: 1; }
+  button.pill { border: none; cursor: pointer; font-family: inherit; }
+  .pill.online { background: rgba(35,165,90,.18); color: var(--ok); }
+  .pill.waking { background: rgba(240,178,50,.18); color: var(--warn); }
+  .pill.offline { background: rgba(218,55,60,.2); color: #f38688; }
   header label { color: var(--faint); font-size: 12px; }
   #serverUrl {
     width: 300px; background: var(--bg); border: 1px solid var(--line); color: var(--text);
@@ -97,6 +101,7 @@
   <header>
     <h1>📡 Live Share</h1>
     <span class="pill" id="statePill">OFFLINE</span>
+    <button class="pill" id="serverPill" title="Status do servidor (clique para verificar)">Servidor…</button>
     <div class="spacer"></div>
     <label for="serverUrl">Servidor</label>
     <input id="serverUrl" spellcheck="false">
@@ -178,6 +183,7 @@
     <div class="grid"></div>
   </template>
 
+<script src="shared/server-wake.js"></script>
 <script src="shared/clip-buffer.js"></script>
 <script src="shared/clip-recorder.js"></script>
 <script src="pcm-worklet.js"></script>

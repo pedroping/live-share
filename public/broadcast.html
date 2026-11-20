@@ -29,6 +29,8 @@
   }
   #audioStatus { font-size: 14px; color: #475569; margin-top: 8px; min-height: 20px; }
   #audioStatus.off { color: #b45309; }
+  .server-status { font-size: 14px; color: #b45309; min-height: 0; margin: 10px 0 0; }
+  .server-status:empty { display: none; }
   .hint { font-size: 13px; color: #64748b; max-width: 560px; margin: 10px auto 0; }
   video { width: 100%; margin-top: 20px; border-radius: 8px; background: #000; aspect-ratio: 16 / 9; }
   a.back { display: inline-block; margin-bottom: 10px; color: #2563eb; text-decoration: none; }
@@ -38,6 +40,7 @@
   <a class="back" href="/">← Voltar</a>
   <h1>Iniciar transmissão</h1>
   <button id="startBtn">Compartilhar tela</button>
+  <p class="server-status" id="serverStatus"></p>
 
   <div class="audio-row">
     <label for="audioSource">🔊 Fonte de áudio:</label>
@@ -62,6 +65,7 @@
 
   <video id="preview" autoplay muted playsinline></video>
 
+<script src="/server-wake.js"></script>
 <script src="/clip-buffer.js"></script>
 <script src="/clip-recorder.js"></script>
 <script>
@@ -355,6 +359,20 @@ startBtn.addEventListener('click', async () => {
   await applyLiveStream();
   startBtn.style.display = 'none';
   controls.style.display = 'flex';
+
+  // The tab may have been open for a while and the free server gone to sleep.
+  const serverStatus = document.getElementById('serverStatus');
+  const awake = await ServerWake.wakeServer('', {
+    onStatus: (s) => { serverStatus.textContent = ServerWake.describe(s); },
+  });
+  if (!awake) {
+    broadcasting = false;
+    stream.getTracks().forEach((t) => t.stop());
+    alert(ServerWake.describe({ state: 'offline' }));
+    location.reload();
+    return;
+  }
+  ServerWake.keepAlive('');
   connectSignaling();
 });
 

@@ -37,7 +37,36 @@ $('serverUrl').addEventListener('change', () => {
   const v = $('serverUrl').value.trim().replace(/\/+$/, '') || DEFAULT_SERVER;
   $('serverUrl').value = v;
   store.set('server', v);
+  ensureServer();
 });
+
+// ---------------------------------------------------------------- server wake
+// The Render free plan sleeps after ~15 min idle; waking takes up to a minute.
+let serverReady = null; // in-flight wake promise
+let stopKeepAlive = null;
+
+function showServer(status) {
+  const pill = $('serverPill');
+  pill.classList.remove('online', 'waking', 'offline');
+  if (status.state === 'online') { pill.textContent = '● Servidor online'; pill.classList.add('online'); }
+  else if (status.state === 'checking') { pill.textContent = 'Verificando servidor…'; }
+  else if (status.state === 'waking') { pill.textContent = `Acordando servidor… ${status.elapsed}s`; pill.classList.add('waking'); }
+  else { pill.textContent = 'Servidor offline · tentar de novo'; pill.classList.add('offline'); }
+  if (!state.live && status.state === 'waking') {
+    $('goLiveNote').textContent = 'O servidor gratuito estava dormindo; acordando (até ~1 min)…';
+  } else if (!state.live && status.state === 'online' && $('goLiveNote').textContent.includes('dormindo')) {
+    $('goLiveNote').textContent = state.selected ? state.selected.name : 'Selecione uma tela ou janela.';
+  }
+}
+
+function ensureServer() {
+  if (!serverReady) {
+    serverReady = ServerWake.wakeServer(server(), { onStatus: showServer })
+      .finally(() => { setTimeout(() => { serverReady = null; }, 0); });
+  }
+  return serverReady;
+}
+$('serverPill').addEventListener('click', ensureServer);
 $('qualitySelect').value = store.get('quality', '1080p30');
 const server = () => $('serverUrl').value.trim().replace(/\/+$/, '') || DEFAULT_SERVER;
 
@@ -174,6 +203,17 @@ async function refreshAudioOptions() {
     }
     select.appendChild(group);
   }
+  // An app minimized to the tray has no visible window and drops out of the
+  // list while still playing; keep it selected as long as the process lives.
+  const [kind, pid, ...nameParts] = state.audioValue.split(':');
+  if ((kind === 'include' || kind === 'exclude') && ![...select.options].some((o) => o.value === state.audioValue)
+      && await liveShare.isProcessAlive(Number(pid))) {
+    const group = [...select.querySelectorAll('optgroup')].find((g) => g.label.startsWith(kind === 'include' ? 'Só' : 'Todo o áudio, exceto'));
+    const o = document.createElement('option');
+    o.value = state.audioValue;
+    o.textContent = `${kind === 'exclude' ? 'Tudo exceto ' : ''}${nameParts.join(':')} (em segundo plano)`;
+    (group || select).appendChild(o);
+  }
   let fellBack = false;
   if (![...select.options].some((o) => o.value === state.audioValue)) {
     // The chosen app/device went away: fall back to the Discord-safe default.
@@ -290,6 +330,11 @@ async function goLive() {
   if (!state.selected) return;
   $('goLiveBtn').disabled = true;
   $('goLiveNote').textContent = 'Conectando…';
+  if (!(await ensureServer())) {
+    $('goLiveBtn').disabled = false;
+    $('goLiveNote').textContent = 'Não consegui acordar o servidor. Confira a internet/URL e tente de novo.';
+    return;
+  }
   try {
     state.displayStream = await captureSource(state.selected);
     await applyAudio();
@@ -308,6 +353,7 @@ async function goLive() {
   $('liveBox').hidden = false;
   $('statePill').textContent = 'AO VIVO';
   $('statePill').classList.add('live');
+  stopKeepAlive = ServerWake.keepAlive(server()); // never let it idle out mid-stream
   connectSignaling();
 }
 
@@ -315,6 +361,7 @@ $('stopBtn').addEventListener('click', () => stopLive());
 
 function stopLive(reason) {
   state.live = false;
+  stopKeepAlive?.();
   state.clipRecorder?.stop();
   state.clipRecorder = null;
   for (const pc of peers.values()) pc.close();
@@ -403,7 +450,17 @@ function connectSignaling() {
     if (!state.live) return;
     $('code').textContent = '····';
     $('watchLink').textContent = 'Reconectando ao servidor…';
-    setTimeout(() => { if (state.live) { peers.forEach((pc) => pc.close()); peers.clear(); updateViewers(); connectSignaling(); } }, 3000);
+    // The server may have restarted or slept: wake it, then open a new room.
+    setTimeout(async () => {
+      if (!state.live) return;
+      peers.forEach((pc) => pc.close());
+      peers.clear();
+      updateViewers();
+      while (state.live && !(await ensureServer())) {
+        $('watchLink').textContent = 'Servidor fora do ar, tentando de novo…';
+      }
+      if (state.live) connectSignaling();
+    }, 2000);
   };
 }
 
@@ -501,6 +558,7 @@ async function uploadRequestedClip({ requestId, duration }) {
 
 // ---------------------------------------------------------------- startup
 (async () => {
+  ensureServer(); // start waking the server right away, before the user picks
   // Device names stay hidden until media permission is granted once.
   try { (await navigator.mediaDevices.getUserMedia({ audio: true })).getTracks().forEach((t) => t.stop()); } catch {}
   await refreshAudioOptions();
