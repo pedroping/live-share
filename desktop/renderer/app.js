@@ -582,6 +582,12 @@ async function uploadRequestedClip({ requestId, duration }) {
     state.selected = (await liveShare.listSources()).find((s) => s.kind === 'screen');
     if (params.get('audio')) state.audioValue = params.get('audio');
     await goLive();
+    setInterval(() => {
+      const a = state.liveStream?.getAudioTracks() || [];
+      const segs = state.clipRecorder?.segments || [];
+      console.log(`DIAG audio=${state.audioValue} tracks=${a.map((x) => `${x.readyState}/${x.muted ? 'muted' : 'on'}`).join(',') || 'none'} ` +
+        `ctx=${audioCtx?.state} recStream=${state.clipRecorder?.stream?.getAudioTracks().length} segs=${segs.length}`);
+    }, 5000);
     return;
   }
   await applyAudio(); // start the level meter with the default (exclude Discord)

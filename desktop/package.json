@@ -1,7 +1,7 @@
 {
   "name": "live-share-desktop",
   "productName": "Live Share",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Desktop broadcaster for live-share: Discord-style screen picker and per-app audio (exclude Discord)",
   "main": "main.js",

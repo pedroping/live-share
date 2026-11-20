@@ -4,8 +4,8 @@ A Discord-style screen-share app for Windows that streams to the live-share webs
 
 ## Download
 
-- [LiveShare-Setup-1.0.0.exe](https://github.com/pedroping/live-share/releases/latest/download/LiveShare-Setup-1.0.0.exe): installer
-- [LiveShare-Portable-1.0.0.exe](https://github.com/pedroping/live-share/releases/latest/download/LiveShare-Portable-1.0.0.exe): runs without installing
+- [LiveShare-Setup.exe](https://github.com/pedroping/live-share/releases/latest/download/LiveShare-Setup.exe): installer
+- [LiveShare-Portable.exe](https://github.com/pedroping/live-share/releases/latest/download/LiveShare-Portable.exe): runs without installing
 
 The builds are unsigned, so Windows SmartScreen will warn on first run: choose *More info → Run anyway*.
 
@@ -41,7 +41,7 @@ cd desktop
 npm run dist
 ```
 
-This writes `dist/Live Share Setup 1.0.0.exe` (installer) and `dist/Live Share 1.0.0.exe` (portable). The builds are unsigned, so Windows SmartScreen will warn on first run: choose *More info → Run anyway*.
+This writes `dist/Live Share Setup <version>.exe` (installer) and `dist/Live Share <version>.exe` (portable). The builds are unsigned, so Windows SmartScreen will warn on first run: choose *More info → Run anyway*.
 
 If NSIS fails with `!include: could not open file`, the project path is too long (over 260 characters). Build from a shorter folder.
 

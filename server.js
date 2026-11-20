@@ -182,27 +182,52 @@ function enqueueClip(job) {
 // differ): normalize to 720p and re-encode with the lightest settings.
 async function renderClip({ files, durations, startOffsetMs, duration, outputBase, poster }) {
   const info = await Promise.all(files.map((f) => probe(f.path)));
-  const same = info.every((i) => i.vcodec === info[0].vcodec && i.width === info[0].width
-    && i.height === info[0].height && i.acodec === info[0].acodec);
-  console.log(`clip: ${files.length} segments, ${same ? 'stream copy' : 're-encode'} ` +
+  const sameVideo = !!info[0].vcodec && info.every((i) => i.vcodec === info[0].vcodec
+    && i.width === info[0].width && i.height === info[0].height);
+  const sameAudio = info.every((i) => i.acodec === info[0].acodec);
+  const mode = !sameVideo ? 're-encode' : sameAudio ? 'stream copy' : 'video copy + audio rebuild';
+  console.log(`clip: ${files.length} segments, ${mode} ` +
     JSON.stringify(info.map((i) => `${i.vcodec} ${i.width}x${i.height} ${i.acodec || 'no-audio'}`)));
 
   let output;
-  if (same && info[0].vcodec) {
+  if (sameVideo) {
     output = `${outputBase}.webm`;
     const listFile = `${outputBase}.txt`;
+    const seconds = files.map((_, i) => (Number(durations[i]) > 0 ? Number(durations[i]) / 1000 : 5).toFixed(3));
     fs.writeFileSync(listFile, files.map((f, i) => {
       const line = `file '${f.path.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`;
-      const d = Number(durations[i]);
       // MediaRecorder WebMs have no duration header; pass the measured one.
-      return d > 0 ? `${line}\nduration ${(d / 1000).toFixed(3)}` : line;
+      return `${line}\nduration ${seconds[i]}`;
     }).join('\n'));
     try {
-      await runFfmpeg([
-        '-y', '-hide_banner', '-loglevel', 'error',
-        '-fflags', '+genpts', '-f', 'concat', '-safe', '0', '-i', listFile,
-        '-c', 'copy', output,
-      ]);
+      if (sameAudio) {
+        await runFfmpeg([
+          '-y', '-hide_banner', '-loglevel', 'error',
+          '-fflags', '+genpts', '-f', 'concat', '-safe', '0', '-i', listFile,
+          '-c', 'copy', output,
+        ]);
+      } else {
+        // Some segments came without audio: copy the video untouched and
+        // rebuild only the (cheap) audio track, filling gaps with silence.
+        const inputs = [];
+        const parts = [];
+        files.forEach((f, i) => {
+          inputs.push('-i', f.path);
+          parts.push(info[i].hasAudio
+            ? `[${i + 1}:a]aformat=sample_rates=48000:channel_layouts=stereo,apad,atrim=duration=${seconds[i]},asetpts=PTS-STARTPTS[a${i}]`
+            : `anullsrc=r=48000:cl=stereo,atrim=duration=${seconds[i]}[a${i}]`);
+        });
+        const filter = `${parts.join(';')};${files.map((_, i) => `[a${i}]`).join('')}concat=n=${files.length}:v=0:a=1[aout]`;
+        await runFfmpeg([
+          '-y', '-hide_banner', '-loglevel', 'error', '-threads', '1',
+          '-fflags', '+genpts', '-f', 'concat', '-safe', '0', '-i', listFile,
+          ...inputs,
+          '-filter_complex', filter,
+          '-map', '0:v', '-map', '[aout]',
+          '-c:v', 'copy', '-c:a', 'libopus', '-b:a', '128k', '-shortest',
+          output,
+        ]);
+      }
     } finally {
       fs.rm(listFile, { force: true }, () => {});
     }
