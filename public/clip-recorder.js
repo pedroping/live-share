@@ -121,6 +121,18 @@
       await segmentDone;
     }
 
+    // Switch to a new capture without losing the buffer: close the current
+    // segment, and the next one starts on the new stream.
+    async setStream(stream) {
+      this.stream = stream;
+      if (this.stopped) return;
+      if (this.recorder) {
+        await this.finalizeCurrentSegment();
+      } else {
+        this.startSegment();
+      }
+    }
+
     async select(seconds) {
       await this.finalizeCurrentSegment();
       return globalScope.selectClipSegments(this.segments, seconds * 1000);

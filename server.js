@@ -126,42 +126,79 @@ app.post('/api/clips', upload.array('videos', 40), async (req, res) => {
   }
 });
 
-// Concatenate the WebM segments (each a standalone MediaRecorder file),
-// cut away the extra lead-in, and encode one MP4 + a poster frame.
-function renderClip({ files, durations, startOffsetMs, duration, output, poster }) {
-  const listFile = path.join(TMP_DIR, `${crypto.randomBytes(6).toString('hex')}.txt`);
-  const list = files.map((f, i) => {
-    const line = `file '${f.path.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`;
-    const d = Number(durations[i]);
-    // MediaRecorder WebMs carry no duration header, so pass the one we measured.
-    return d > 0 ? `${line}\nduration ${(d / 1000).toFixed(3)}` : line;
-  }).join('\n');
-  fs.writeFileSync(listFile, list);
-
-  const run = (args) => new Promise((resolve, reject) => {
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
     execFile(ffmpegPath, args, { maxBuffer: 16 * 1024 * 1024 }, (err, _out, stderr) => {
       if (err) reject(new Error(stderr.split('\n').slice(-8).join('\n')));
       else resolve();
     });
   });
+}
 
-  return run([
+// Read resolution and whether there is an audio stream ("ffmpeg -i" prints it).
+function probe(file) {
+  return new Promise((resolve) => {
+    execFile(ffmpegPath, ['-hide_banner', '-i', file], (_err, _out, stderr = '') => {
+      const size = stderr.match(/Video:.*?(\d{2,5})x(\d{2,5})/);
+      resolve({
+        width: size ? Number(size[1]) : 0,
+        height: size ? Number(size[2]) : 0,
+        hasAudio: /Stream #.*Audio:/.test(stderr),
+      });
+    });
+  });
+}
+
+const even = (n) => Math.max(2, Math.floor(n / 2) * 2);
+
+// Join the WebM segments (each a standalone MediaRecorder file), cut away the
+// extra lead-in, and encode one MP4 + a poster frame. Segments may come from
+// different sources (the broadcaster can switch mid-stream), so each one is
+// normalized to the same size/fps and gets silent audio if it has none.
+async function renderClip({ files, durations, startOffsetMs, duration, output, poster }) {
+  const info = await Promise.all(files.map((f) => probe(f.path)));
+  const first = info.find((i) => i.width && i.height) || { width: 1280, height: 720 };
+  let W = first.width;
+  let H = first.height;
+  const fit = Math.min(1, 1920 / W, 1080 / H);
+  W = even(W * fit);
+  H = even(H * fit);
+
+  const inputs = [];
+  const filters = [];
+  const pairs = [];
+  files.forEach((f, i) => {
+    inputs.push('-i', f.path);
+    const d = Number(durations[i]) > 0 ? (Number(durations[i]) / 1000).toFixed(3) : '5';
+    filters.push(
+      `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
+      `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,` +
+      `tpad=stop_mode=clone:stop_duration=1,trim=duration=${d},setpts=PTS-STARTPTS[v${i}]`,
+    );
+    filters.push(info[i].hasAudio
+      ? `[${i}:a]aformat=sample_rates=48000:channel_layouts=stereo,apad,atrim=duration=${d},asetpts=PTS-STARTPTS[a${i}]`
+      : `anullsrc=r=48000:cl=stereo,atrim=duration=${d}[a${i}]`);
+    pairs.push(`[v${i}][a${i}]`);
+  });
+  const start = (startOffsetMs / 1000).toFixed(3);
+  filters.push(`${pairs.join('')}concat=n=${files.length}:v=1:a=1[vc][ac]`);
+  filters.push(`[vc]trim=start=${start}:duration=${duration},setpts=PTS-STARTPTS[vo]`);
+  filters.push(`[ac]atrim=start=${start}:duration=${duration},asetpts=PTS-STARTPTS[ao]`);
+
+  await runFfmpeg([
     '-y', '-hide_banner', '-loglevel', 'error',
-    '-fflags', '+genpts',
-    '-f', 'concat', '-safe', '0', '-i', listFile,
-    '-ss', (startOffsetMs / 1000).toFixed(3),
-    '-t', String(duration),
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
-    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-    '-c:a', 'aac', '-b:a', '128k',
+    ...inputs,
+    '-filter_complex', filters.join(';'),
+    '-map', '[vo]', '-map', '[ao]',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+    '-c:a', 'aac', '-b:a', '160k',
     '-movflags', '+faststart',
     output,
-  ])
-    .then(() => run([
-      '-y', '-hide_banner', '-loglevel', 'error',
-      '-i', output, '-frames:v', '1', '-vf', 'scale=640:-2', poster,
-    ]))
-    .finally(() => fs.rm(listFile, { force: true }, () => {}));
+  ]);
+  await runFfmpeg([
+    '-y', '-hide_banner', '-loglevel', 'error',
+    '-i', output, '-frames:v', '1', '-vf', 'scale=640:-2', poster,
+  ]);
 }
 
 // ---------- WebSocket signaling ----------

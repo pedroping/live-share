@@ -143,7 +143,9 @@ function setupPeerConnection() {
   pc = new RTCPeerConnection({ iceServers });
 
   pc.ontrack = (event) => {
-    remoteVideo.srcObject = event.streams[0];
+    // Source switches can add a track to the same stream; don't reset playback.
+    const stream = event.streams[0] || new MediaStream([event.track]);
+    if (remoteVideo.srcObject !== stream) remoteVideo.srcObject = stream;
     remoteVideo.onloadedmetadata = () => { clipBar.style.display = 'block'; };
   };
 

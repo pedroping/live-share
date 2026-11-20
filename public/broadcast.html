@@ -13,7 +13,18 @@
   button:disabled { background: #93c5fd; cursor: default; }
   #codeBox { margin: 20px 0; padding: 16px; background: #f1f5f9; border-radius: 8px; }
   #codeDisplay { font-size: 40px; letter-spacing: 6px; margin: 4px 0; font-weight: 700; }
-  #watchLink { font-size: 14px; color: #475569; word-break: break-all; }
+  .link-row { display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap; margin: 8px 0; }
+  #watchLink {
+    font-size: 14px; color: #334155; word-break: break-all; background: white;
+    border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px 10px;
+  }
+  button.small { padding: 8px 14px; font-size: 14px; }
+  #copyBtn.copied { background: #16a34a; }
+  #controls { margin-top: 16px; display: none; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; }
+  #switchBtn { background: #475569; }
+  #audioStatus { font-size: 14px; color: #475569; }
+  #audioStatus.off { color: #b45309; }
+  .hint { font-size: 13px; color: #64748b; max-width: 520px; margin: 10px auto 0; }
   video { width: 100%; margin-top: 20px; border-radius: 8px; background: #000; aspect-ratio: 16 / 9; }
   a.back { display: inline-block; margin-bottom: 10px; color: #2563eb; text-decoration: none; }
 </style>
@@ -22,12 +33,24 @@
   <a class="back" href="/">← Voltar</a>
   <h1>Iniciar transmissão</h1>
   <button id="startBtn">Compartilhar tela</button>
+  <p class="hint" id="startHint">
+    Para enviar a tela inteira com todo o áudio do computador, escolha <b>Tela inteira</b>
+    e marque <b>Compartilhar áudio do sistema</b> (Chrome/Edge no Windows).
+  </p>
 
   <div id="codeBox" style="display:none">
     <p>Código da sala:</p>
     <div id="codeDisplay"></div>
-    <p id="watchLink"></p>
+    <div class="link-row">
+      <span id="watchLink"></span>
+      <button id="copyBtn" class="small" type="button">📋 Copiar link</button>
+    </div>
     <p id="viewerCount">Espectadores conectados: 0</p>
+  </div>
+
+  <div id="controls">
+    <button id="switchBtn" class="small" type="button">🔄 Trocar fonte</button>
+    <span id="audioStatus"></span>
   </div>
 
   <video id="preview" autoplay muted playsinline></video>
@@ -36,20 +59,47 @@
 <script src="/clip-recorder.js"></script>
 <script>
 const startBtn = document.getElementById('startBtn');
+const startHint = document.getElementById('startHint');
 const codeBox = document.getElementById('codeBox');
 const codeDisplay = document.getElementById('codeDisplay');
 const watchLink = document.getElementById('watchLink');
+const copyBtn = document.getElementById('copyBtn');
+const controls = document.getElementById('controls');
+const switchBtn = document.getElementById('switchBtn');
+const audioStatus = document.getElementById('audioStatus');
 const viewerCountEl = document.getElementById('viewerCount');
 const preview = document.getElementById('preview');
 
 let ws;
-let localStream;
+let localStream;   // the current screen capture
 let clipRecorder;
 const peers = new Map(); // viewerId -> RTCPeerConnection
+// One stable outbound stream id, so viewers keep the same MediaStream when
+// the source changes and tracks are swapped underneath it.
+const outboundStream = new MediaStream();
 
 const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
 const MAX_WEBRTC_VIDEO_BITRATE = 8_000_000;
 const CLIP_VIDEO_BITRATE = 6_000_000;
+const CAPTURE_OPTIONS = {
+  video: {
+    width: { ideal: 1920, max: 1920 },
+    height: { ideal: 1080, max: 1080 },
+    frameRate: { ideal: 30, max: 30 },
+  },
+  // Raw computer audio: no voice-call processing, which mangles music/games.
+  audio: {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    suppressLocalAudioPlayback: false,
+  },
+  systemAudio: 'include',          // offer "Share system audio" for whole screens
+  windowAudio: 'system',           // newer Chrome: allow audio with windows too
+  monitorTypeSurfaces: 'include',  // keep "Entire screen" in the picker
+  surfaceSwitching: 'include',     // Chrome's own "Share this tab instead" button
+  selfBrowserSurface: 'exclude',   // don't offer this tab (mirror effect)
+};
 
 // Prefer H264 (usually hardware-encoded on the GPU) over the browser's default
 // VP8 (CPU only). Resolution, bitrate and frame rate are unchanged.
@@ -78,27 +128,128 @@ function updateViewerCount() {
   viewerCountEl.textContent = `Espectadores conectados: ${peers.size}`;
 }
 
-startBtn.addEventListener('click', async () => {
+// ---------- copy link ----------
+copyBtn.addEventListener('click', async () => {
+  const link = watchLink.textContent;
   try {
-    localStream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        width: { ideal: 1920, max: 1920 },
-        height: { ideal: 1080, max: 1080 },
-        frameRate: { ideal: 30, max: 30 },
-      },
-      audio: true,
-    });
+    await navigator.clipboard.writeText(link);
+  } catch {
+    // Fallback for browsers that block the async clipboard API.
+    const range = document.createRange();
+    range.selectNodeContents(watchLink);
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.execCommand('copy');
+    selection.removeAllRanges();
+  }
+  copyBtn.textContent = '✅ Copiado!';
+  copyBtn.classList.add('copied');
+  clearTimeout(copyBtn.resetTimer);
+  copyBtn.resetTimer = setTimeout(() => {
+    copyBtn.textContent = '📋 Copiar link';
+    copyBtn.classList.remove('copied');
+  }, 2000);
+});
+
+// ---------- capture ----------
+async function captureScreen() {
+  const stream = await navigator.mediaDevices.getDisplayMedia(CAPTURE_OPTIONS);
+  const videoTrack = stream.getVideoTracks()[0];
+  if ('contentHint' in videoTrack) videoTrack.contentHint = 'detail';
+  const audioTrack = stream.getAudioTracks()[0];
+  if (audioTrack && 'contentHint' in audioTrack) audioTrack.contentHint = 'music';
+  return stream;
+}
+
+// The browser's own "Stop sharing" button ends the broadcast.
+function onCaptureEnded() {
+  clipRecorder?.stop();
+  localStream = null;
+  if (ws?.readyState === WebSocket.OPEN) ws.close();
+  location.reload();
+}
+
+function showAudioStatus(stream) {
+  const hasAudio = stream.getAudioTracks().length > 0;
+  audioStatus.textContent = hasAudio ? '🔊 Enviando áudio' : '🔇 Sem áudio (marque "Compartilhar áudio" ao escolher a fonte)';
+  audioStatus.classList.toggle('off', !hasAudio);
+}
+
+function useStream(stream) {
+  const previous = localStream;
+  previous?.getVideoTracks()[0]?.removeEventListener('ended', onCaptureEnded);
+
+  localStream = stream;
+  preview.srcObject = stream;
+  stream.getVideoTracks()[0].addEventListener('ended', onCaptureEnded);
+  showAudioStatus(stream);
+
+  outboundStream.getTracks().forEach((t) => outboundStream.removeTrack(t));
+  stream.getTracks().forEach((t) => outboundStream.addTrack(t));
+  return previous;
+}
+
+startBtn.addEventListener('click', async () => {
+  let stream;
+  try {
+    stream = await captureScreen();
   } catch (err) {
     alert('Não foi possível capturar a tela: ' + err.message);
     return;
   }
 
-  preview.srcObject = localStream;
-  const videoTrack = localStream.getVideoTracks()[0];
-  if ('contentHint' in videoTrack) videoTrack.contentHint = 'detail';
-  startBtn.disabled = true;
-  startBtn.textContent = 'Transmitindo...';
+  useStream(stream);
+  startBtn.style.display = 'none';
+  startHint.style.display = 'none';
+  controls.style.display = 'flex';
+  connectSignaling();
+});
 
+// ---------- switch source ----------
+switchBtn.addEventListener('click', async () => {
+  switchBtn.disabled = true;
+  let stream;
+  try {
+    stream = await captureScreen();
+  } catch (err) {
+    // Picker cancelled: keep sharing the current source.
+    switchBtn.disabled = false;
+    return;
+  }
+
+  const previous = useStream(stream);
+  try {
+    await Promise.all([...peers.values()].map((pc) => swapTracks(pc, stream)));
+    await clipRecorder?.setStream(stream);
+  } catch (error) {
+    console.error('Erro ao trocar a fonte:', error);
+  } finally {
+    previous?.getTracks().forEach((t) => t.stop());
+    switchBtn.disabled = false;
+  }
+});
+
+// Swap tracks on an existing connection. replaceTrack needs no renegotiation;
+// only a brand-new kind (audio appearing for the first time) does.
+async function swapTracks(pc, stream) {
+  let needsOffer = false;
+  for (const kind of ['video', 'audio']) {
+    const track = stream.getTracks().find((t) => t.kind === kind) || null;
+    const sender = pc.getSenders().find((s) => s.kindHint === kind);
+    if (sender) {
+      await sender.replaceTrack(track);
+    } else if (track) {
+      const newSender = pc.addTrack(track, outboundStream);
+      newSender.kindHint = kind;
+      needsOffer = true;
+    }
+  }
+  if (needsOffer) await sendOffer(pc);
+}
+
+// ---------- signaling ----------
+function connectSignaling() {
   ws = new WebSocket(location.origin.replace(/^http/, 'ws'));
 
   ws.onopen = () => sendSignal({ type: 'create-room' });
@@ -134,15 +285,9 @@ startBtn.addEventListener('click', async () => {
   ws.onclose = () => {
     if (localStream?.active) alert('Conexão com o servidor perdida. Recarregue para transmitir de novo.');
   };
+}
 
-  videoTrack.addEventListener('ended', () => {
-    clipRecorder?.stop();
-    localStream = null;
-    if (ws?.readyState === WebSocket.OPEN) ws.close();
-    location.reload();
-  });
-});
-
+// ---------- clips ----------
 function ensureClipRecorder() {
   if (clipRecorder) return;
   clipRecorder = new RollingClipRecorder(localStream, { videoBitsPerSecond: CLIP_VIDEO_BITRATE });
@@ -191,13 +336,25 @@ async function uploadRequestedClip({ requestId, duration }) {
   }
 }
 
+// ---------- peers ----------
+async function sendOffer(pc) {
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  sendSignal({ type: 'offer', target: pc.viewerId, sdp: offer });
+}
+
 async function addViewer(viewerId) {
   const pc = new RTCPeerConnection({ iceServers });
+  pc.viewerId = viewerId;
   peers.set(viewerId, pc);
 
-  const senders = localStream.getTracks().map((track) => pc.addTrack(track, localStream));
+  const senders = localStream.getTracks().map((track) => {
+    const sender = pc.addTrack(track, outboundStream);
+    sender.kindHint = track.kind;
+    return sender;
+  });
   preferHardwareCodec(pc);
-  const videoSender = senders.find((s) => s.track?.kind === 'video');
+  const videoSender = senders.find((s) => s.kindHint === 'video');
   if (videoSender) {
     const parameters = videoSender.getParameters();
     if (!parameters.encodings?.length) parameters.encodings = [{}];
@@ -206,6 +363,13 @@ async function addViewer(viewerId) {
     await videoSender.setParameters(parameters).catch((error) => {
       console.warn('O navegador não aplicou o limite de bitrate:', error);
     });
+  }
+  const audioSender = senders.find((s) => s.kindHint === 'audio');
+  if (audioSender) {
+    const parameters = audioSender.getParameters();
+    if (!parameters.encodings?.length) parameters.encodings = [{}];
+    parameters.encodings[0].maxBitrate = 192_000; // stereo music quality
+    await audioSender.setParameters(parameters).catch(() => {});
   }
 
   pc.addEventListener('connectionstatechange', () => {
@@ -221,9 +385,7 @@ async function addViewer(viewerId) {
     if (event.candidate) sendSignal({ type: 'ice-candidate', target: viewerId, candidate: event.candidate });
   };
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  sendSignal({ type: 'offer', target: viewerId, sdp: offer });
+  await sendOffer(pc);
   updateViewerCount();
 }
 </script>
